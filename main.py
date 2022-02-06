@@ -11,8 +11,7 @@ import random
 import argparse
 import datetime
 import numpy as np
-
-import torch
+import torch,torchvision
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 
@@ -29,7 +28,7 @@ from utils import load_checkpoint, load_pretrained, save_checkpoint, get_grad_no
 
 try:
     # noinspection PyUnresolvedReferences
-    from apex import amp
+    from torch.cuda import amp
 except ImportError:
     amp = None
 
@@ -45,6 +44,7 @@ def parse_option():
     )
 
     # easy config modification
+    # config.DATA.ZIP_MODE
     parser.add_argument('--batch-size', type=int, help="batch size for single GPU")
     parser.add_argument('--data-path', type=str, help='path to dataset')
     parser.add_argument('--zip', action='store_true', help='use zipped dataset instead of folder dataset')
@@ -86,7 +86,7 @@ def main(config):
 
     optimizer = build_optimizer(config, model)
     if config.AMP_OPT_LEVEL != "O0":
-        model, optimizer = amp.initialize(model, optimizer, opt_level=config.AMP_OPT_LEVEL)
+        scaler=amp.GradScaler()
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[config.LOCAL_RANK], broadcast_buffers=False)
     model_without_ddp = model.module
 
@@ -141,7 +141,7 @@ def main(config):
     for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
         data_loader_train.sampler.set_epoch(epoch)
 
-        train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler)
+        train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,scaler)
         if dist.get_rank() == 0 and (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
             save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger)
 
@@ -155,7 +155,7 @@ def main(config):
     logger.info('Training time {}'.format(total_time_str))
 
 
-def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler):
+def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler,scaler):
     model.train()
     optimizer.zero_grad()
 
@@ -172,46 +172,47 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-
-        outputs = model(samples)
-
+        with torch.cuda.amp.autocast(enabled=True):
+            outputs = model(samples)
         if config.TRAIN.ACCUMULATION_STEPS > 1:
-            loss = criterion(outputs, targets)
-            loss = loss / config.TRAIN.ACCUMULATION_STEPS
+            with torch.cuda.amp.autocast(enabled=True):
+                loss = criterion(outputs, targets)
+                loss = loss / config.TRAIN.ACCUMULATION_STEPS
             if config.AMP_OPT_LEVEL != "O0":
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
+                scaler.scale(loss).backward(retain_graph=False)
                 if config.TRAIN.CLIP_GRAD:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), config.TRAIN.CLIP_GRAD)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.TRAIN.CLIP_GRAD)
                 else:
-                    grad_norm = get_grad_norm(amp.master_params(optimizer))
+                    grad_norm = get_grad_norm(model.parameters())
             else:
-                loss.backward()
+                scaler.scale(loss).backward(retain_graph=False)
                 if config.TRAIN.CLIP_GRAD:
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.TRAIN.CLIP_GRAD)
                 else:
                     grad_norm = get_grad_norm(model.parameters())
             if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad()
                 lr_scheduler.step_update(epoch * num_steps + idx)
         else:
-            loss = criterion(outputs, targets)
+            with torch.cuda.amp.autocast(enabled=True):
+                loss = criterion(outputs, targets)
             optimizer.zero_grad()
             if config.AMP_OPT_LEVEL != "O0":
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                if config.TRAIN.CLIP_GRAD:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), config.TRAIN.CLIP_GRAD)
-                else:
-                    grad_norm = get_grad_norm(amp.master_params(optimizer))
-            else:
-                loss.backward()
+                scaler.scale(loss).backward(retain_graph=False)
                 if config.TRAIN.CLIP_GRAD:
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.TRAIN.CLIP_GRAD)
                 else:
                     grad_norm = get_grad_norm(model.parameters())
-            optimizer.step()
+            else:
+                scaler.scale(loss).backward(retain_graph=False)
+                if config.TRAIN.CLIP_GRAD:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.TRAIN.CLIP_GRAD)
+                else:
+                    grad_norm = get_grad_norm(model.parameters())
+            scaler.step(optimizer)
+            scaler.update()
             lr_scheduler.step_update(epoch * num_steps + idx)
 
         torch.cuda.synchronize()
@@ -305,7 +306,6 @@ def throughput(data_loader, model, logger):
 
 if __name__ == '__main__':
     _, config = parse_option()
-
     if config.AMP_OPT_LEVEL != "O0":
         assert amp is not None, "amp not installed!"
 

@@ -13,7 +13,6 @@ from torchvision import datasets, transforms
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.data import Mixup
 from timm.data import create_transform
-
 from .cached_image_folder import CachedImageFolder
 from .samplers import SubsetRandomSampler
 
@@ -92,7 +91,7 @@ def build_loader(config):
 def build_dataset(is_train, config):
     transform = build_transform(is_train, config)
     if config.DATA.DATASET == 'imagenet':
-        prefix = 'train' if is_train else 'val'
+        prefix = 'train' if is_train else 'val/val'
         if config.DATA.ZIP_MODE:
             ann_file = prefix + "_map.txt"
             prefix = prefix + ".zip@/"

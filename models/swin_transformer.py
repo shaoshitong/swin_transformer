@@ -94,14 +94,27 @@ class WindowAttention(nn.Module):
         coords_w = torch.arange(self.window_size[1])
         coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+        # 所有点横轴相减，所有点纵轴相减
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww # row-col
         relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
         relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
         relative_coords[:, :, 1] += self.window_size[1] - 1
-        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        # 横轴最远距离为2*h-1，所以要乘上这个值，这样每个大小度不同了
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1 #
         relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
         self.register_buffer("relative_position_index", relative_position_index)
 
+        """
+        size:49*49
+        每两个点之间的哈夫曼距离之差
+        ([[ 84,  83,  82,  ...,   2,   1,   0],
+        [ 85,  84,  83,  ...,   3,   2,   1],
+        [ 86,  85,  84,  ...,   4,   3,   2],
+        ...,
+        [166, 165, 164,  ...,  84,  83,  82],
+        [167, 166, 165,  ...,  85,  84,  83],
+        [168, 167, 166,  ...,  86,  85,  84]])
+        """
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -117,16 +130,16 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4) # kqv,B,num_head,N,d_model
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
-
+        # Wh,Ww
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        attn = attn + relative_position_bias.unsqueeze(0)
+        attn = attn + relative_position_bias.unsqueeze(0) # yes
 
         if mask is not None:
             nW = mask.shape[0]
@@ -158,7 +171,6 @@ class WindowAttention(nn.Module):
         # x = self.proj(x)
         flops += N * self.dim * self.dim
         return flops
-
 
 class SwinTransformerBlock(nn.Module):
     r""" Swin Transformer Block.
@@ -217,13 +229,13 @@ class SwinTransformerBlock(nn.Module):
                         slice(-self.shift_size, None))
             cnt = 0
             for h in h_slices:
-                for w in w_slices:
+                for w in w_slices: # 0,1,2,3,4,5,6,7,8
                     img_mask[:, h, w, :] = cnt
                     cnt += 1
 
             mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
             mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2) # if equal
             attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
         else:
             attn_mask = None
@@ -237,7 +249,7 @@ class SwinTransformerBlock(nn.Module):
 
         shortcut = x
         x = self.norm1(x)
-        x = x.view(B, H, W, C)
+        x = x.view(B, H, W, C) # 1,56,56,96
 
         # cyclic shift
         if self.shift_size > 0:
@@ -246,6 +258,7 @@ class SwinTransformerBlock(nn.Module):
             shifted_x = x
 
         # partition windows
+        # 先移位在进行窗口划分
         x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
@@ -287,7 +300,7 @@ class SwinTransformerBlock(nn.Module):
         flops += self.dim * H * W
         return flops
 
-
+SwinTransformerBlock(96,(56,56),3,7,shift_size=3)
 class PatchMerging(nn.Module):
     r""" Patch Merging Layer.
 
