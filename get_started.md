@@ -31,8 +31,9 @@ Note: access code for `baidu` is `swin`.
 - Clone this repo:
 
 ```bash
-git clone https://github.com/microsoft/Swin-Transformer.git
+git clone https://github.com/shaoshitong/swin_transformer.git
 cd Swin-Transformer
+git checkout origin/pytorch -b pytorch
 ```
 
 - Create a conda virtual environment and activate it:
@@ -42,12 +43,9 @@ conda create -n swin python=3.7 -y
 conda activate swin
 ```
 
-- Install `CUDA==10.1` with `cudnn7` following
-  the [official installation instructions](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html)
-- Install `PyTorch==1.7.1` and `torchvision==0.8.2` with `CUDA==10.1`:
-
+- Install pytorch as following:
 ```bash
-conda install pytorch==1.7.1 torchvision==0.8.2 cudatoolkit=10.1 -c pytorch
+conda install pytorch torchvision torchaudio cudatoolkit=11.3 -c pytorch
 ```
 
 - Install `timm==0.3.2`:
